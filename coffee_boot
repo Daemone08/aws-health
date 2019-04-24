@@ -1,0 +1,15 @@
+#!/bin/bash
+# Script to change into the proper directory to run coffee on boot
+
+# Store drive path (edit with config file)
+# drivePath=/home/kyle/gdrive/"IT Documents"/Legacy/Logs/MorningCoffee
+
+# Sleep for 60 to let desktop load
+sleep 60
+
+# Check if it has been run already today
+# Sort the folder to check for most recent date
+# ls /home/kyle/gdrive/IT\ Documents/Legacy/Logs/MorningCoffee | sort -r | cut -c-10 | head -n 1
+
+# Change into proper directory and run coffee
+gnome-terminal --window-with-profile=noclose --working-directory=/home/kyle/gdrive/"IT Documents"/Legacy/Logs/MorningCoffee -e coffee

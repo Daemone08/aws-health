@@ -1,0 +1,94 @@
+#!/bin/bash
+# Script to monitor the Disk Space metric of all instances in order to report and log any abnormalities
+
+# Reference config file for configuration details
+# Source the configuration
+. /var/lib/jenkins/workspace/aws_health/conf/coffee.config
+
+scanTolerance="$dskScanTolerance"
+scanPeriod="$dskScanPeriod"
+scanStat="$dskScanStat"
+scanDashboardName="$dskScanDashboardName"
+scanMetricName="$dskScanMetricName"
+scanNamespace="$dskScanNamespace"
+scanMountPath="$dskScanMountPath"
+scanFilesystem="$dskScanFilesystem"
+
+# Text for display purposes 
+greeting="Please see Disk Utilization dashboard scan below"
+thresholdMessage="Threshold: $scanTolerance%, Period: $scanPeriod seconds, Stat: $scanStat"
+lineBreak="-------------------------------------------------------------"
+lineBreakShort="------------"
+
+echo "$greeting"$'\r'
+echo "$lineBreakShort"$'\r'
+echo "$thresholdMessage"$'\r'
+echo "$lineBreak"$'\r'
+
+# Store epoch time as a variable
+epochTime=$(date +%s)
+
+# 24 hours in epoch time
+oneDayEpoch=86400
+
+# Set scan start & end times in AWS format (x1000)
+let scanEndTime=$epochTime
+let scanStartTime=($epochTime-$oneDayEpoch)
+
+# Command to retrieve all current instance IDs that are part of the metric dashboard and create an array
+dashBoardInstanceIDs=($(aws cloudwatch get-dashboard --dashboard-name "$scanDashboardName" | grep -oP 'i-[0-9a-z]*'))
+
+# Dashboard JSON array configuration
+jsonArray=()
+for (( i=0; i<${#dashBoardInstanceIDs[@]}; i++ ));
+do
+	jsonInstance=$(jo -p Id="mu$i" MetricStat=$(jo Metric=$(jo Namespace="$scanNamespace" MetricName="$scanMetricName" Dimensions=$(jo -a $(jo Name=MountPath Value="$scanMountPath") $(jo Name=InstanceId Value="${dashBoardInstanceIDs[i]}") $(jo Name=Filesystem Value="$scanFilesystem"))) Period="$scanPeriod" Stat="$scanStat"))
+	jsonArray=("${jsonArray[@]}" "$jsonInstance")
+done
+
+# Create --metric-data-queries JSON and insert into CLI to retrieve memory metrics for all instances
+jo -a "${jsonArray[@]}" > jsonArray.json
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile VA_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonVA.json
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile OR_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonOR.json
+
+# Create strings to parse labels data
+labelsStrVA=$(cat scanJsonVA.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+labelsStrOR=$(cat scanJsonOR.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+# Split the strings into arrays
+labelsArrVA=($(echo "$labelsStrVA" | tr ' ' '\n'))
+labelsArrOR=($(echo "$labelsStrOR" | tr ' ' '\n'))
+
+# Create strings to parse values data
+valuesStrVA=$(cat scanJsonVA.json | jq ".Values")
+valuesStrOR=$(cat scanJsonOR.json | jq ".Values")
+
+
+# Loop through every instance, extracting maximums, and printing if above threshold 
+# VA instances
+echo "VA INSTANCES"$'\r'
+for (( j=0; j<${#dashBoardInstanceIDs[@]}; j++ ));
+do
+	maxValueVA=$(echo "$valuesStrVA" | jq -s ".[$j]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	if [ $((maxValueVA)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrVA[$j]}: $maxValueVA% ($(./idtoname_va ${labelsArrVA[$j]}))"$'\r'
+	fi 
+done
+echo "$lineBreakShort"$'\r'
+# OR instances
+echo "OR INSTANCES"$'\r'
+for (( k=0; k<${#dashBoardInstanceIDs[@]}; k++ ));
+do
+	maxValueOR=$(echo "$valuesStrOR" | jq -s ".[$k]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	if [ $((maxValueOR)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrOR[$k]}: $maxValueOR% ($(./idtoname_or ${labelsArrOR[$k]}))"$'\r'
+	fi
+done
+
+echo "$lineBreak"$'\r'
+
+# Cleanup
+rm -r jsonArray.json
+rm -r scanJsonVA.json
+rm -r scanJsonOR.json

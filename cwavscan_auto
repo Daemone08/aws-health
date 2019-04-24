@@ -1,0 +1,47 @@
+#!/bin/bash
+# Script to perform daily scan of CloudWatch ClamAV logs and report any infections
+# Auto - indicates optomized for automation
+
+# Text for display purposes 
+greeting="Please see CloudWatch ClamAV stream scan results below"
+lineBreak="-------------------------------------------------------------"
+lineBreakShort="------------"
+
+echo "$greeting"$'\r'
+echo "$lineBreak"$'\r'
+
+# Store epoch time as a variable
+epochTime=$(date +%s)
+
+# 24 hours in epoch time
+oneDayEpoch=86400
+
+# Set scan start time in AWS format (x1000) 
+let scanStartTime=($epochTime-$oneDayEpoch)*1000
+
+# Create an array of all instances in the VA log stream
+logStreamsVA=($(aws logs describe-log-streams --log-group-name /var/log/clamav/clamscan.log --profile VA_json | grep -oP 'logStreamName": "\K[a-zA-Z0-9.-]*'))
+
+# Create an array of all instances in the OR log stream
+logStreamsOR=($(aws logs describe-log-streams --log-group-name /var/log/clamav/clamscan.log --profile OR_json | grep -oP 'logStreamName": "\K[a-zA-Z0-9.-]*'))
+
+# Loop through the region arrays and echo infected servers
+
+# VA streams
+echo "VA INSTANCES"$'\r'
+for (( k=0; k<${#logStreamsVA[@]}; k++ ));
+do
+    aws logs get-log-events --log-group-name /var/log/clamav/clamscan.log --log-stream-name ${logStreamsVA[k]} --start-time $scanStartTime --profile VA_json | grep -oP 'Infected files: [1-9]' && echo ${logStreamsVA[k]}$'\r'
+done
+
+echo "$lineBreakShort"$'\r'
+
+# OR streams
+echo "OR INSTANCES"$'\r'
+for (( ii=0; ii<${#logStreamsOR[@]}; ii++ ));
+do
+    aws logs get-log-events --log-group-name /var/log/clamav/clamscan.log --log-stream-name ${logStreamsOR[ii]} --start-time $scanStartTime --profile OR_json | grep -oP 'Infected files: [1-9]' && echo ${logStreamsOR[ii]}$'\r'
+done
+
+# Wait for user confirmation logs have been read
+echo "$lineBreak"$'\r'

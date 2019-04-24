@@ -1,0 +1,128 @@
+#!/bin/bash
+# Script to monitor the CloudWatch logs to ensure instances are reporting, and to copy and delete unused log streams
+
+# Reference config file for configuration details
+# Source the configuration
+. /var/lib/jenkins/workspace/aws_health/conf/coffee.config
+
+scanTolerance="$logScanTolerance"
+scanRetention="$logScanRetention"
+
+# Text for display purposes 
+greeting="Please see CloudWatch log stream activity scan below"
+thresholdMessage="Threshold: $scanTolerance days Retention: $scanRetention days"
+lineBreak="-------------------------------------------------------------"
+lineBreakShort="------------"
+
+echo "$greeting"$'\r'
+echo "$lineBreakShort"$'\r'
+echo "$thresholdMessage"$'\r'
+echo "$lineBreak"$'\r'
+
+# Store epoch time as a variable
+epochTime=$(date +%s)
+# Epoch time in mils
+let epochTimeMils=($epochTime*1000)
+# 24 hours in epoch time (mils)
+let oneDayEpoch=(86400*1000)
+
+# Convert tolerance and retention to mils
+let scanToleranceMilS=($oneDayEpoch*$scanTolerance)
+let scanRetentionMilS=($oneDayEpoch*$scanRetention)
+# Determine cuttoff dates in seconds
+let toleranceDate=($epochTimeMils-$scanToleranceMilS)
+let retentionDate=($epochTimeMils-$scanRetentionMilS)
+
+# Save path for backups
+savePath=/var/lib/jenkins/gdrive/"IT Documents"/Legacy/Logs/MorningCoffee/LogScans/Backups
+
+# Command to retrieve all current log group names and create an array
+logGroupNamesVA=($(aws logs describe-log-groups --query 'logGroups[*].[logGroupName]' --profile VA_json | grep -oP '[a-zA-Z0-9\-\./_]*'))
+logGroupNamesOR=($(aws logs describe-log-groups --query 'logGroups[*].[logGroupName]' --profile OR_json | grep -oP '[a-zA-Z0-9\-\./_]*'))
+# echo "${logGroupNamesVA[6]}"$'\r'
+
+# Command to retrieve log streams from log groups
+# VA streams
+echo "VA LOG STREAMS"$'\r'
+
+# Loop through all log groups one at a time
+for (( i=0; i<${#logGroupNamesVA[@]}; i++ ));
+do
+	echo "Log Group Name: ${logGroupNamesVA[i]}"$'\r'
+    lastActivityArray=($(aws logs describe-log-streams --log-group-name ${logGroupNamesVA[i]} --query 'logStreams[*].[lastEventTimestamp]' --profile VA_json | grep -oP '\b[0-9]{13}'))
+    logStreamsArray=($(aws logs describe-log-streams --log-group-name ${logGroupNamesVA[i]} --query 'logStreams[*].[logStreamName]' --profile VA_json | grep -oP '"[a-zA-Z0-9\-\.\[\]/$_]*"'))
+    # Loop through all last activity and test for any activity older than threshold 
+    for (( j=0; j<${#lastActivityArray[@]}; j++ ));
+    do
+    	let lastActivity=$(echo "${lastActivityArray[j]}")
+    	if [ $((lastActivity)) -le $((toleranceDate)) ]
+    	then
+    		let timeDifferential=($epochTimeMils/$oneDayEpoch-$lastActivity/$oneDayEpoch)
+    		# Echo log streams older than tolerance
+    		echo "    ${logStreamsArray[j]}: $timeDifferential days old"$'\r'
+    	fi
+    	# Make copies of log streams older than retention then delete
+    	if [ $((lastActivity)) -le $((retentionDate)) ]
+    	then
+    		# Make backup directory and file
+    		# Format directory 
+    		logGroupTemp="${logGroupNamesVA[i]}"
+    		modifiedLogGroup=$(echo "$logGroupTemp" | tr "/" "+")
+    		mkdir -p "$savePath/VA_$modifiedLogGroup"
+    		# Push to Drive
+    		drive push -quiet -directories "$savePath/VA_$modifiedLogGroup"
+    		# Format file
+    		logStreamTemp="${logStreamsArray[j]}"
+    		modifiedLogStream=$(echo "$logStreamTemp" | tr "/" "+" | tail -c +2 | head -c -2)
+    		# Get events and append to log
+            aws logs get-log-events --log-group-name "${logGroupNamesVA[i]}" --log-stream-name $(echo "${logStreamsArray[j]}" | tail -c +2 | head -c -2) --profile VA_json  >> "$savePath/VA_$modifiedLogGroup/$modifiedLogStream.log"
+            # Push to Drive
+            drive push -quiet "$savePath/VA_$modifiedLogGroup/$modifiedLogStream.log"
+            # Delete
+            aws logs delete-log-stream --log-group-name "${logGroupNamesVA[i]}" --log-stream-name $(echo "${logStreamsArray[j]}" | tail -c +2 | head -c -2) --profile VA_json
+    	fi
+    done
+done
+echo "$lineBreakShort"$'\r'    
+
+# OR streams
+echo "OR LOG STREAMS"$'\r'
+
+# Loop through all log groups one at a time
+for (( ii=0; ii<${#logGroupNamesOR[@]}; ii++ ));
+do
+	echo "Log Group Name: ${logGroupNamesOR[ii]}"$'\r'
+    lastActivityArray=($(aws logs describe-log-streams --log-group-name ${logGroupNamesOR[ii]} --query 'logStreams[*].[lastEventTimestamp]' --profile OR_json | grep -oP '\b[0-9]{13}'))
+    logStreamsArray=($(aws logs describe-log-streams --log-group-name ${logGroupNamesOR[ii]} --query 'logStreams[*].[logStreamName]' --profile OR_json | grep -oP '"[a-zA-Z0-9\-\.\[\]/$_]*"'))
+    # Loop through all last activity and test for any activity older than threshold 
+    for (( jj=0; jj<${#lastActivityArray[@]}; jj++ ));
+    do
+    	let lastActivity=$(echo "${lastActivityArray[jj]}")
+    	if [ $((lastActivity)) -le $((toleranceDate)) ]
+    	then
+    		let timeDifferential=($epochTimeMils/$oneDayEpoch-$lastActivity/$oneDayEpoch)
+    		echo "    ${logStreamsArray[jj]}: $timeDifferential days old"$'\r'
+    	fi
+    	# Make copies of log streams older than retention then delete
+    	if [ $((lastActivity)) -le $((retentionDate)) ]
+    	then
+    		# Make backup directory and file
+    		# Format directory 
+    		logGroupTemp="${logGroupNamesOR[ii]}"
+    		modifiedLogGroup=$(echo "$logGroupTemp" | tr "/" "+")
+    		mkdir -p "$savePath/OR_$modifiedLogGroup"
+    		# Push to Drive
+    		drive push -quiet -directories "$savePath/OR_$modifiedLogGroup"
+    		# Format file
+    		logStreamTemp="${logStreamsArray[jj]}"
+    		modifiedLogStream=$(echo "$logStreamTemp" | tr "/" "+" | tail -c +2 | head -c -2)
+    		# Get events and append to log
+            aws logs get-log-events --log-group-name "${logGroupNamesOR[ii]}" --log-stream-name $(echo "${logStreamsArray[jj]}" | tail -c +2 | head -c -2) --profile OR_json  >> "$savePath/OR_$modifiedLogGroup/$modifiedLogStream.log"
+            # Push to Drive
+            drive push -quiet "$savePath/OR_$modifiedLogGroup/$modifiedLogStream.log"
+            # Delete
+            aws logs delete-log-stream --log-group-name "${logGroupNamesOR[ii]}" --log-stream-name $(echo "${logStreamsArray[jj]}" | tail -c +2 | head -c -2) --profile OR_json
+    	fi
+    done
+done   
+echo "$lineBreak"$'\r'

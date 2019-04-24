@@ -1,0 +1,131 @@
+#!/bin/bash
+# Script to monitor the MemoryUtilization metric of all instances in order to report and log any abnormalities
+
+# Reference config file for configuration details
+# Source the configuration
+. /var/lib/jenkins/workspace/aws_health/conf/coffee.config
+
+scanTolerance="$memScanTolerance"
+scanPeriod_1="$(echo $memScanPeriod | cut -d',' -f1)"
+let scanPeriod_1_mins=$((scanPeriod_1))/60
+scanPeriod_2="$(echo $memScanPeriod | cut -d',' -f2)"
+let scanPeriod_2_mins=$((scanPeriod_2))/60
+scanStat="$memScanStat"
+scanDashboardName="$memScanDashboardName"
+scanMetricName="$memScanMetricName"
+scanNamespace="$memScanNamespace"
+
+
+# Text for display purposes 
+greeting="Please see MemoryUtilization dashboard scan below"
+thresholdMessage="Threshold: $scanTolerance%, Periods: $scanPeriod_1 sec and $scanPeriod_2 sec, Stat: $scanStat"
+lineBreak="-------------------------------------------------------------"
+lineBreakShort="------------"
+
+echo "$greeting"$'\r'
+echo "$lineBreakShort"$'\r'
+echo "$thresholdMessage"$'\r'
+echo "$lineBreak"$'\r'
+
+# Store epoch time as a variable
+epochTime=$(date +%s)
+
+# 24 hours in epoch time
+oneDayEpoch=86400
+
+# Set scan start & end times in AWS format (x1000)
+let scanEndTime=$epochTime
+let scanStartTime=($epochTime-$oneDayEpoch)
+
+# Command to retrieve all current instance IDs that are part of the MemoryUtilization dashboard and create an array
+dashBoardInstanceIDs=($(aws cloudwatch get-dashboard --dashboard-name "$scanDashboardName" | grep -oP 'i-[0-9a-z]*'))
+
+# Dashboard JSON array configuration (5 minutes)
+jsonArray_1=()
+for (( i=0; i<${#dashBoardInstanceIDs[@]}; i++ ));
+do
+	jsonInstance=$(jo -p Id="fmmu$i" MetricStat=$(jo Metric=$(jo Namespace="$scanNamespace" MetricName="$scanMetricName" Dimensions=$(jo -a $(jo Name=InstanceId Value="${dashBoardInstanceIDs[i]}"))) Period="$scanPeriod_1" Stat="$scanStat"))
+	jsonArray_1=("${jsonArray_1[@]}" "$jsonInstance")
+done
+
+# Dashboard JSON array configuration (1 hour)
+jsonArray_2=()
+for (( ii=0; ii<${#dashBoardInstanceIDs[@]}; ii++ ));
+do
+	jsonInstance=$(jo -p Id="hmu$ii" MetricStat=$(jo Metric=$(jo Namespace="$scanNamespace" MetricName="$scanMetricName" Dimensions=$(jo -a $(jo Name=InstanceId Value="${dashBoardInstanceIDs[ii]}"))) Period="$scanPeriod_2" Stat="$scanStat"))
+	jsonArray_2=("${jsonArray_2[@]}" "$jsonInstance")
+done
+
+# Create --metric-data-queries JSON and insert into CLI to retrieve metrics for all instances (5 minutes and 1 hour period)
+jo -a "${jsonArray_1[@]}" > jsonArray_1.json
+jo -a "${jsonArray_2[@]}" > jsonArray_2.json
+
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray_1.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile VA_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonVA_1.json
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray_1.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile OR_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonOR_1.json
+
+# Create strings to parse labels data
+labelsStrVA_1=$(cat scanJsonVA_1.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+labelsStrOR_1=$(cat scanJsonOR_1.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+# Split the strings into arrays
+labelsArrVA_1=($(echo "$labelsStrVA_1" | tr ' ' '\n'))
+labelsArrOR_1=($(echo "$labelsStrOR_1" | tr ' ' '\n'))
+
+# Create strings to parse values data
+valuesStrVA_1=$(cat scanJsonVA_1.json | jq ".Values")
+valuesStrOR_1=$(cat scanJsonOR_1.json | jq ".Values")
+
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray_2.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile VA_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonVA_2.json
+aws cloudwatch get-metric-data --metric-data-queries file://jsonArray_2.json --start-time "$scanStartTime" --end-time "$scanEndTime" --profile OR_json | jq '.MetricDataResults[] | {Label: .Label, Values: .Values}' > scanJsonOR_2.json
+
+# Create strings to parse labels data
+labelsStrVA_2=$(cat scanJsonVA_2.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+labelsStrOR_2=$(cat scanJsonOR_2.json | jq ".Label" | grep -o "i-[a-z0-9]*")
+# Split the strings into arrays
+labelsArrVA_2=($(echo "$labelsStrVA_2" | tr ' ' '\n'))
+labelsArrOR_2=($(echo "$labelsStrOR_2" | tr ' ' '\n'))
+
+# Create strings to parse values data
+valuesStrVA_2=$(cat scanJsonVA_2.json | jq ".Values")
+valuesStrOR_2=$(cat scanJsonOR_2.json | jq ".Values")
+
+
+# Loop through every instance, extracting maximums, and printing if above threshold 
+# VA instances
+echo "VA INSTANCES"$'\r'
+for (( j=0; j<${#dashBoardInstanceIDs[@]}; j++ ));
+do
+	maxValueVA_1=$(echo "$valuesStrVA_1" | jq -s ".[$j]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	maxValueVA_2=$(echo "$valuesStrVA_2" | jq -s ".[$j]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	if [ $((maxValueVA_2)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrVA_2[$j]}: $maxValueVA_2% / $scanPeriod_2_mins mins ($(./idtoname_va ${labelsArrVA_2[$j]}))"$'\r'	
+	elif [ $((maxValueVA_1)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrVA_1[$j]}: $maxValueVA_1% / $scanPeriod_1_mins mins ($(./idtoname_va ${labelsArrVA_1[$j]}))"$'\r'
+	fi 
+done
+echo "$lineBreakShort"$'\r'
+# OR instances
+echo "OR INSTANCES"$'\r'
+for (( k=0; k<${#dashBoardInstanceIDs[@]}; k++ ));
+do
+	maxValueOR_1=$(echo "$valuesStrOR_1" | jq -s ".[$k]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	maxValueOR_2=$(echo "$valuesStrOR_2" | jq -s ".[$k]" | sed 's/null/00.0/g' | grep -oP "[0-9]{2}\." | sort -r | head -n 1 | grep -oP "[0-9]{2}")
+	if [ $((maxValueOR_2)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrOR_2[$k]}: $maxValueOR_2% / $scanPeriod_2_mins mins ($(./idtoname_or ${labelsArrOR_2[$k]}))"$'\r'	
+	elif [ $((maxValueOR_1)) -ge $((scanTolerance)) ]
+	then
+		echo "${labelsArrOR_1[$k]}: $maxValueOR_1% / $scanPeriod_1_mins mins ($(./idtoname_or ${labelsArrOR_1[$k]}))"$'\r'
+	fi 
+done
+
+echo "$lineBreak"$'\r'
+
+# Cleanup
+rm -r jsonArray_1.json
+rm -r scanJsonVA_1.json
+rm -r scanJsonOR_1.json
+rm -r jsonArray_2.json
+rm -r scanJsonVA_2.json
+rm -r scanJsonOR_2.json
